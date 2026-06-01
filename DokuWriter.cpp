@@ -296,7 +296,9 @@ static void ParseLineSpans(const std::string &line, int lineOffset)
 
             // Grey out the delimiter tokens so they are visible but unobtrusive
             ApplyColor((int)(lineOffset + open),  (int)(lineOffset + open + dlen),  RGB(180,180,180));
+			ApplyHidden((int)(lineOffset + open), (int)(lineOffset + open + dlen), g_hideMarkup);
             ApplyColor((int)(lineOffset + close), (int)(lineOffset + close + dlen), RGB(180,180,180));
+			ApplyHidden((int)(lineOffset + close), (int)(lineOffset + close + dlen), g_hideMarkup);
 
             pos = close + dlen;
         }
@@ -967,7 +969,9 @@ static void OnCommand(WPARAM wParam)
             "  ==== Heading 3 ====\r\n"
             "  * Bullet item\r\n"
             "  (blank line = paragraph break)\r\n"
-			"  [[URL|Label]]\r\n",
+			"  [[URL|Label]]\r\n"
+			"  ''monospaced text''\r\n"
+			"  ((Citation/Footnote))\r\n",
             "About DokuWriter",
             MB_ICONINFORMATION);
         break;
