@@ -1,8 +1,0 @@
-# Todo
-
- * Add support for dokuwiki-style links
- * Add support for dark mode (inverting colors)
- * Change the default file affix to something like `*.dwt`
- * Publish some executables and releases
- * Add support for enabling the color extention in dokuwiki (colored text, should be pretty easy bc coloring text is easy)
- * Add support for loading images (far future)
