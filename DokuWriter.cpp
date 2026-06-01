@@ -50,6 +50,10 @@
 #define IDM_FORMAT_BULLET   207
 #define IDM_HELP_ABOUT      301
 #define IDM_VIEW_HIDEMARKUP 401
+#define LINK_COLOR			RGB(0, 102, 204)
+#define IDM_VIEW_WORDWRAP	402
+#define IDM_VIEW_ZOOMIN		403
+#define IDM_VIEW_ZOOMOUT	404 // Error: not found					rofl
 
 // Toolbar button IDs (same as menu IDs for simplicity)
 #define ID_TB_NEW           IDM_FILE_NEW
@@ -81,6 +85,8 @@ static std::string g_currentFile = "";   // Current open file path (empty = unti
 static bool        g_modified    = false; // Has the document been modified?
 static bool        g_reformatting = false; // Guard against recursive EN_CHANGE
 static bool		   g_hideMarkup  = false; // false = show markup tokens, true = hide them
+static bool	       g_wordWrap	= false; // false = no word wrapping, true = word wrapping
+static int		   g_baseFontSize = 11; // points; scales up/down with zoom
 
 // =============================================================================
 // MARKUP PARSER
@@ -181,6 +187,69 @@ static void ApplyHidden(int start, int end, bool hidden)
 }
 
 // --------------------------------------------------------------------------
+// ApplyBackground: Highlighting (changing the color of the background behind
+// the text
+// --------------------------------------------------------------------------
+static void ApplyBackground(int start, int end, COLORREF color)
+{
+	CHARFORMAT2A cf = MakeCF2();
+	cf.dwMask = CFM_BACKCOLOR;
+	cf.crBackColor = color;
+	SetCharFmt(start, end, cf);
+}
+
+// --------------------------------------------------------------------------
+// ParseLineCitation: Parse citations
+// --------------------------------------------------------------------------
+static void ParseLineCitation(const std::string &line, int lineOffset, int lineLen)
+{
+	// Citation block: ((text))
+	// Must start with (( and end with ))
+	if (line.size() < 5) return;
+	if (line.substr(0,2) != "((" ) return;
+	size_t close = line.rfind("))");
+	if (close == std::string::npos || close < 2) return;
+
+	int contentStart = lineOffset + 2;
+	int contentEnd = (int)(lineOffset + close);
+	int tokenEnd = lineOffset + lineLen;
+
+	// Style the (( prefix
+	ApplyColor(lineOffset, lineOffset + 2, RGB(180,180,180));
+	ApplyHidden(lineOffset, lineOffset + 2, g_hideMarkup);
+
+	// Style the content: italic, muted grey
+	if (contentEnd > contentStart)
+	{
+		CHARFORMAT2A cf = MakeCF2();
+		cf.dwMask = CFM_ITALIC | CFM_COLOR;
+		cf.dwEffects = CFE_ITALIC;
+		cf.crTextColor = RGB(100,100,100);
+		SetCharFmt(contentStart, contentEnd, (CHARFORMAT2A &)cf);
+	}
+
+	// Style the )) suffix
+	ApplyColor((int)(lineOffset + close), (int)(lineOffset + close + 2), RGB(180,180,180));
+	ApplyHidden((int)(lineOffset + close), (int)(lineOffset + close + 2), g_hideMarkup);
+
+	// Indent the whole line via paragraph formatting
+	CHARRANGE cr;
+	cr.cpMin = lineOffset;
+	cr.cpMax = lineOffset + lineLen;
+	SendMessage(g_hEdit, EM_EXSETSEL, 0, (LPARAM)&cr);
+
+	PARAFORMAT2 pf;
+	ZeroMemory(&pf, sizeof(pf));
+	pf.cbSize = sizeof(pf);
+	pf.dwMask = PFM_STARTINDENT | PFM_RIGHTINDENT | PFM_BORDER;
+	pf.dxStartIndent = 720; // ~0.5 inch left indent 
+	pf.dxStartIndent = 720; // ~0.5 inch right indent
+	pf.wBorders = 0x001; // left border only
+	pf.wBorderWidth = 15; // border thickness in twips
+	SendMessage(g_hEdit, EM_SETPARAFORMAT, 0, (LPARAM)&pf);
+}
+
+// --------------------------------------------------------------------------
 // ParseLineSpans:
 //   Scans a single line (given as a std::string) for inline markup tokens
 //   (**bold**, //italic//, __underline__) and applies formatting.
@@ -232,6 +301,110 @@ static void ParseLineSpans(const std::string &line, int lineOffset)
             pos = close + dlen;
         }
     }
+	// Monospace
+	{
+		const char *delim = "''";
+		const int dlen = 2;
+		size_t pos = 0;
+		while (pos < line.size())
+		{
+			size_t open = line.find(delim, pos);
+			if (open == std::string::npos) break;
+
+			size_t close = line.find(delim, open + dlen);
+			if (close == std::string::npos) break;
+
+			int contentStart = (int)(lineOffset + open + dlen);
+			int contentEnd = (int)(lineOffset + close);
+
+			if (contentEnd > contentStart)
+			{
+				// Red monospaced text with grey background
+				CHARFORMAT2A cf = MakeCF2();
+				cf.dwMask = CFM_FACE | CFM_COLOR | CFM_BACKCOLOR;
+				cf.dwEffects = 0;
+				cf.crTextColor = RGB(180,0,0);
+				cf.crBackColor = RGB(220,220,220);
+				lstrcpyA((char*)cf.szFaceName, "Courier New");
+				SetCharFmt(contentStart, contentEnd, (CHARFORMAT2A &)cf);
+			}
+
+			// Grey out and optionally hide the '' delimiters
+			ApplyColor((int)(lineOffset + open), (int)(lineOffset + open + dlen), RGB(180,180,180));
+			ApplyHidden((int)(lineOffset + open), (int)(lineOffset + open + dlen), g_hideMarkup);
+			ApplyColor((int)(lineOffset + close), (int)(lineOffset + close + dlen), RGB(180,180,180));
+			ApplyHidden((int)(lineOffset + close), (int)(lineOffset + close + dlen), g_hideMarkup);
+
+			pos = close + dlen;
+		}
+	}
+}
+
+// --------------------------------------------------------------------------
+// ParseLineLinks: Add pseudo support for adding links (so my wiki start page
+// looks better
+// --------------------------------------------------------------------------
+static void ParseLineLinks(const std::string &line, int lineOffset)
+{
+	size_t pos = 0;
+	while (pos < line.size())
+	{
+		// Find opening [[
+		size_t open = line.find("[[", pos);
+		if (open == std::string::npos) break;
+
+		// Find closing ]]
+		size_t close = line.find("]]", open + 2);
+		if (close == std::string::npos) break;
+
+		// Everything between [[ and ]]
+		std::string inner = line.substr(open + 2, close - open - 2);
+
+		// Split on | to file URL and label
+		size_t pipe = inner.find('|');
+		std::string label;
+		if (pipe != std::string::npos)
+			label = inner.substr(pipe + 1); // text after the pipe
+		else
+			label = inner;  // no pipe: the whole thing is both URL and label
+
+		// Character ranges in the document
+		int tokenStart = (int)(lineOffset + open);		// Start of [[
+		int labelStart = (int)(lineOffset + open + 2);	// start of content
+		int labelEnd = (int)(lineOffset + close);		// end of content (before ]])
+		int tokenEnd = (int)(lineOffset + close + 2);	// end of ]]
+
+		if (pipe != std::string::npos)
+		{
+			// Hide or grey the URL portion and the pipe: [[ url | label ]]
+			int urlEnd = (int)(lineOffset + open + 2 + (int)pipe + 1); // up to and including |
+
+			// Style the [[ prefix
+			ApplyColor(tokenStart, labelStart, RGB(180,180,180));
+			ApplyHidden(tokenStart, labelStart, g_hideMarkup);
+
+			// Style "url|" - grey/hidden
+			ApplyColor(labelStart, urlEnd, RGB(180,180,180));
+			ApplyHidden(labelStart, urlEnd, g_hideMarkup);
+
+			// Style the label text - bold, underlined, and blue
+			int displayStart = urlEnd;
+			int displayEnd = labelEnd;
+			if (displayEnd > displayStart)
+			{
+				CHARFORMAT cf = MakeCF2();
+				cf.dwMask = CFM_BOLD | CFM_UNDERLINE | CFM_COLOR;
+				cf.dwEffects = CFE_BOLD | CFE_UNDERLINE;
+				cf.crTextColor = LINK_COLOR;
+				SetCharFmt(displayStart, displayEnd, (CHARFORMAT2 &)cf);
+
+				ApplyColor(labelEnd, tokenEnd, RGB(180, 180, 180));
+				ApplyHidden(labelEnd, tokenEnd, g_hideMarkup);
+			}
+
+			pos = close + 2;
+		}
+	}
 }
 
 // --------------------------------------------------------------------------
@@ -257,9 +430,11 @@ static void ReapplyFormatting()
 
         CHARFORMAT2 cfDefault = MakeCF2();
         cfDefault.dwMask      = CFM_BOLD | CFM_ITALIC | CFM_UNDERLINE |
-                                CFM_SIZE | CFM_COLOR   | CFM_FACE;
+                                CFM_SIZE | CFM_COLOR   | CFM_FACE |
+								CFM_BACKCOLOR;
+		cfDefault.crBackColor = RGB(255,255,255);
         cfDefault.dwEffects   = 0;
-        cfDefault.yHeight     = TWIPS(11); // 11pt body text
+        cfDefault.yHeight     = TWIPS(g_baseFontSize); // Text size
         cfDefault.crTextColor = RGB(0, 0, 0);
         lstrcpyA(cfDefault.szFaceName, "Times New Roman");
         SendMessage(g_hEdit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cfDefault);
@@ -352,6 +527,12 @@ static void ReapplyFormatting()
 
         // -- Inline spans (bold/italic/underline) on all lines --
         ParseLineSpans(line, lineOffset);
+
+		// Links [[url|label]] or [[url]]
+		ParseLineLinks(line, lineOffset);
+
+		// Citations
+		ParseLineCitation(line, lineOffset, lineLen);
 
         // Advance past this line + the '\r' separator
         pos = eol + 1;
@@ -633,6 +814,39 @@ static bool CheckSaveModified()
     return true;
 }
 
+// =============================================================================
+// Word Wrapping
+// =============================================================================
+static void SetWordWrap(bool wrap)
+{
+	if (wrap)
+	{
+		// NULL DC + 0 line width = wrap to window
+		SendMessage(g_hEdit, EM_SETTARGETDEVICE, (WPARAM)NULL, 0);
+		// Hide both scroll bars and only show the vertical one
+		ShowScrollBar(g_hEdit, SB_BOTH, FALSE);
+		ShowScrollBar(g_hEdit, SB_VERT, TRUE);
+	}
+	else
+	{
+		// NULL DC + 1 line width = no wrapping
+		SendMessage(g_hEdit, EM_SETTARGETDEVICE, (WPARAM)NULL, 1);
+		// Show all the scroll bars since word wrapping is off
+		ShowScrollBar(g_hEdit, SB_BOTH, FALSE);
+		ShowScrollBar(g_hEdit, SB_HORZ, TRUE);
+		ShowScrollBar(g_hEdit, SB_VERT, TRUE);
+	}
+
+	// Force RichEdit to recalculate its line layout be resizing it.
+	// We do this by briefly toggling its size, which flushes the layout engine.
+	RECT rc;
+	GetClientRect(g_hEdit, &rc);
+	SetWindowPos(g_hEdit, NULL, 0, 0,
+		rc.right - rc.left, rc.bottom - rc.top,
+		SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED);
+}
+
+
 static void OnCommand(WPARAM wParam)
 {
     WORD cmd = LOWORD(wParam);
@@ -710,27 +924,27 @@ static void OnCommand(WPARAM wParam)
 
     // -- Format Menu / Toolbar --
     case IDM_FORMAT_BOLD:
-        WrapSelectionWith("**", "**");
+        WrapSelectionWith("**", "");
         break;
 
     case IDM_FORMAT_ITALIC:
-        WrapSelectionWith("//", "//");
+        WrapSelectionWith("//", "");
         break;
 
     case IDM_FORMAT_UNDER:
-        WrapSelectionWith("__", "__");
+        WrapSelectionWith("__", "");
         break;
 
     case IDM_FORMAT_H1:
-        InsertHeading("====== ", " ======");
+        InsertHeading("====== ", "");
         break;
 
     case IDM_FORMAT_H2:
-        InsertHeading("===== ", " =====");
+        InsertHeading("===== ", "");
         break;
 
     case IDM_FORMAT_H3:
-        InsertHeading("==== ", " ====");
+        InsertHeading("==== ", "");
         break;
 
     case IDM_FORMAT_BULLET:
@@ -740,7 +954,7 @@ static void OnCommand(WPARAM wParam)
     // -- Help Menu --
     case IDM_HELP_ABOUT:
         MessageBoxA(g_hMainWnd,
-            "DokuWriter by vmunix\r\n\r\n"
+            "DokuWriter v0.2 by vmunix\r\n\r\n"
             "A simple WYSIWYG word processor\r\n"
             "using DokuWiki-style markup.\r\n\r\n"
             "Markup syntax:\r\n"
@@ -752,7 +966,8 @@ static void OnCommand(WPARAM wParam)
             "  ===== Heading 2 =====\r\n"
             "  ==== Heading 3 ====\r\n"
             "  * Bullet item\r\n"
-            "  (blank line = paragraph break)",
+            "  (blank line = paragraph break)\r\n"
+			"  [[URL|Label]]\r\n",
             "About DokuWriter",
             MB_ICONINFORMATION);
         break;
@@ -771,6 +986,41 @@ static void OnCommand(WPARAM wParam)
 			g_reformatting = true;
 			ReapplyFormatting();
 			g_reformatting = false;
+			break;
+		}
+	case IDM_VIEW_WORDWRAP:
+		{
+			g_wordWrap = !g_wordWrap;
+
+			HMENU hMenu = GetMenu(g_hMainWnd);
+			HMENU hView = GetSubMenu(hMenu, 1); // View is index 1
+			CheckMenuItem(hView, IDM_VIEW_WORDWRAP,
+				MF_BYCOMMAND | (g_wordWrap ? MF_CHECKED : MF_UNCHECKED));
+
+			SetWordWrap(g_wordWrap);
+			break;
+		}
+	case IDM_VIEW_ZOOMIN:
+		{
+			if (g_baseFontSize < 72) // cap at 72pt
+			{
+				g_baseFontSize += 1;
+				g_reformatting = true;
+				ReapplyFormatting();
+				g_reformatting = false;
+			}
+			break;
+		}
+		
+	case IDM_VIEW_ZOOMOUT:
+		{
+			if (g_baseFontSize > 6) // floor at 6pt
+			{
+				g_baseFontSize -= 1;
+				g_reformatting = true;
+				ReapplyFormatting();
+				g_reformatting = false;
+			}
 			break;
 		}
     }
@@ -798,6 +1048,9 @@ static HMENU CreateAppMenu()
 	// View Menu
 	HMENU hView = CreatePopupMenu();
 	AppendMenuA(hView, MF_STRING, IDM_VIEW_HIDEMARKUP, "Hide &Markup\tCtrl+M");
+	AppendMenuA(hView, MF_STRING, IDM_VIEW_WORDWRAP, "Word &Wrap\tCtrl+W");
+	AppendMenuA(hView, MF_STRING, IDM_VIEW_ZOOMIN, "Zoom &In\tCtrl++");
+	AppendMenuA(hView, MF_STRING, IDM_VIEW_ZOOMOUT, "Zoom &Out\t Ctrl+-");
 	AppendMenuA(hMenuBar, MF_POPUP, (UINT_PTR)hView, "&View");
 
     // Format menu
@@ -1029,6 +1282,9 @@ static HACCEL CreateAcceleratorTable_()
         { FVIRTKEY | FCONTROL, '3', IDM_FORMAT_H3    },
         { FVIRTKEY | FCONTROL, 'L', IDM_FORMAT_BULLET},
 		{ FVIRTKEY | FCONTROL, 'M', IDM_VIEW_HIDEMARKUP },
+		{ FVIRTKEY | FCONTROL, 'W', IDM_VIEW_WORDWRAP },
+		{ FVIRTKEY | FCONTROL, VK_OEM_PLUS, IDM_VIEW_ZOOMIN },
+		{ FVIRTKEY | FCONTROL, VK_OEM_MINUS, IDM_VIEW_ZOOMOUT },
     };
     return CreateAcceleratorTable(accel, sizeof(accel)/sizeof(accel[0]));
 }
