@@ -7,7 +7,7 @@
  * Add support for italicizing links
  * Add support for code blocks (no highlighting though)
  * Fix the text automatically scrolling to the cursor
- * Add support for <del>, superscript, subscript, and double backslash line breaks
+ * Add support for `<del>`, superscript, subscript, and double backslash line breaks
  * Add "Insert" menu item for dokuwiki emojis and also the FIXME and DELETEME things.
  * Fix loading big dokuwiki articles with lots of rich text locking up the program (Tested with the dokuwiki syntax page on Windows XP)
  * Add support for enabling the color extention in dokuwiki (colored text, should be pretty easy bc coloring text is easy)
